@@ -10,6 +10,7 @@ clean:
 	gerbil clean
 
 install: build
+	rm -rf ~/.gerbil/pkg/gerbil-pcre*
 	cd /tmp && gerbil pkg link -g gerbil-pcre $(CURDIR)
 	cd /tmp && gerbil pkg build -g gerbil-pcre
 
