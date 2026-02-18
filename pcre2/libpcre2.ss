@@ -109,8 +109,8 @@ ___SCMOBJ ffi_pcre2_match_data_free(void *ptr) {
  * Compile wrapper — stores error info in statics (not thread-safe
  * for concurrent compiles, but compile is normally done once).
  * ------------------------------------------------------------------- */
-static int    _ffi_errorcode   = 0;
-static size_t _ffi_erroroffset = 0;
+static __thread int    _ffi_errorcode   = 0;
+static __thread size_t _ffi_erroroffset = 0;
 
 static pcre2_code_8* ffi_pcre2_compile(
     const char* pattern, uint32_t options)
@@ -127,7 +127,7 @@ static size_t ffi_pcre2_compile_erroroffset(void) { return _ffi_erroroffset; }
  * Error message
  * ------------------------------------------------------------------- */
 static __thread char _ffi_errbuf[512];
-static const char* ffi_pcre2_get_error_message(int errorcode) {
+static char* ffi_pcre2_get_error_message(int errorcode) {
     int rc = pcre2_get_error_message_8(
         errorcode, (PCRE2_UCHAR8*)_ffi_errbuf, sizeof(_ffi_errbuf));
     if (rc < 0) return "Unknown PCRE2 error";
@@ -209,8 +209,8 @@ static int ffi_pcre2_do_substitute(
     return rc;
 }
 
-static const char* ffi_pcre2_substitute_result(void) {
-    return _ffi_subst_buf ? _ffi_subst_buf : "";
+static char* ffi_pcre2_substitute_result(void) {
+    return _ffi_subst_buf ? _ffi_subst_buf : (char*)"";
 }
 
 static void ffi_pcre2_substitute_free(void) {
@@ -277,7 +277,7 @@ static uint32_t ffi_pcre2_name_entry_size(const pcre2_code_8* code) {
     return size;
 }
 
-static const char* ffi_pcre2_name_entry_name(
+static char* ffi_pcre2_name_entry_name(
     const pcre2_code_8* code, uint32_t index)
 {
     PCRE2_SPTR8 table = NULL;
@@ -286,8 +286,8 @@ static const char* ffi_pcre2_name_entry_name(
     pcre2_pattern_info_8(code, PCRE2_INFO_NAMETABLE, &table);
     pcre2_pattern_info_8(code, PCRE2_INFO_NAMEENTRYSIZE, &entry_size);
     pcre2_pattern_info_8(code, PCRE2_INFO_NAMECOUNT, &name_count);
-    if (!table || entry_size == 0 || index >= name_count) return "";
-    return (const char*)(table + index * entry_size + 2);
+    if (!table || entry_size == 0 || index >= name_count) return (char*)"";
+    return (char*)(table + index * entry_size + 2);
 }
 
 static uint32_t ffi_pcre2_name_entry_group(

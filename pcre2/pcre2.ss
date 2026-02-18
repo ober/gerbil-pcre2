@@ -75,7 +75,8 @@
    capture-count ; uint32: number of capturing groups
    jit?          ; boolean: JIT compilation succeeded
    name-table)   ; alist ((name . group-number) ...) or '()
-  final: #t)
+  final: #t
+  transparent: #t)
 
 ;; Match result — immutable snapshot of one successful match.
 ;; span-vec: vector of (start . end) pairs, or #f for unset groups.
@@ -83,13 +84,17 @@
   (span-vec    ; internal: vector of (start . end) or #f
    subject     ; subject string (for substring extraction)
    name-table) ; alist ((name . group-number) ...) for named access
-  final: #t)
+  final: #t
+  transparent: #t)
 
 ;; Mutex protecting the static substitute buffer in libpcre2
 (def _substitute-mutex (make-mutex 'pcre2-substitute))
 
 ;; Mutex protecting compile-time C statics (_ffi_errorcode, _ffi_erroroffset, _ffi_errbuf)
 (def _compile-mutex (make-mutex 'pcre2-compile))
+
+;; Thread-local reusable match-data for boolean-only matches (pcre2-matches?)
+(def _bool-match-data (make-parameter #f))
 
 ;; Mask options to unsigned 32-bit for FFI (define-const loads PCRE2_ANCHORED
 ;; as signed -2147483648 which Gambit rejects for unsigned-int32 parameters)
@@ -196,20 +201,32 @@
 (def _cache       '())  ; alist: (pattern . pcre-regex)
 
 (def (pcre2-compile/cached pattern)
+  ;; Double-checked locking: hold cache mutex only for lookup/insert,
+  ;; not during compilation (which may be slow with JIT).
+  (def entry #f)
   (mutex-lock! _cache-mutex)
   (unwind-protect
-    (let ((entry (assoc pattern _cache)))
-      (if entry
-        (begin
-          ;; Move to front for LRU behavior
-          (set! _cache (cons entry (filter (lambda (e) (not (eq? e entry))) _cache)))
-          (cdr entry))
-        (let ((rx (pcre2-compile pattern)))
-          (set! _cache (cons (cons pattern rx) _cache))
-          (when (> (length _cache) _cache-max)
-            (set! _cache (take _cache _cache-max)))
-          rx)))
-    (mutex-unlock! _cache-mutex)))
+    (begin
+      (set! entry (assoc pattern _cache))
+      (when entry
+        ;; Move to front for LRU behavior
+        (set! _cache (cons entry (filter (lambda (e) (not (eq? e entry))) _cache)))))
+    (mutex-unlock! _cache-mutex))
+  (if entry
+    (cdr entry)
+    ;; Compile outside the lock, then insert with double-check
+    (let ((rx (pcre2-compile pattern)))
+      (mutex-lock! _cache-mutex)
+      (unwind-protect
+        (let ((entry2 (assoc pattern _cache)))
+          (if entry2
+            (cdr entry2) ;; another thread compiled it first
+            (begin
+              (set! _cache (cons (cons pattern rx) _cache))
+              (when (> (length _cache) _cache-max)
+                (set! _cache (take _cache _cache-max)))
+              rx)))
+        (mutex-unlock! _cache-mutex)))))
 
 (def (ensure-regex pattern-or-regex)
   (cond
@@ -266,10 +283,13 @@
 
 (def (pcre2-matches? rx/str subject (start 0))
   ;; Test-only: returns boolean. No capture overhead.
-  ;; Uses minimal match-data (1 slot) since we only need yes/no.
+  ;; Uses thread-local reusable match-data (1 slot) to avoid per-call GC pressure.
   (let* ((rx   (ensure-regex rx/str))
          (code (pcre-regex-code rx))
-         (md   (ffi-pcre2-match-data-create 1))
+         (md   (or (_bool-match-data)
+                   (let ((new-md (ffi-pcre2-match-data-create 1)))
+                     (_bool-match-data new-md)
+                     new-md)))
          (byte-start (if (zero? start) 0
                        (char-index->byte-offset (string->bytes subject) start)))
          (rc   (if (pcre-regex-jit? rx)
@@ -293,7 +313,7 @@
     (and entry (pcre-match-group m (cdr entry)))))
 
 (def (pcre-match-positions m (n 0))
-  ;; Return (start . end) byte positions for group n, or #f if unset.
+  ;; Return (start . end) character positions for group n, or #f if unset.
   (vector-ref (pcre-match-span-vec m) n))
 
 (def (pcre-match->list m)
@@ -458,7 +478,7 @@
 ;;; Pattern quoting
 ;;;
 
-(def _meta-chars-list (string->list "\\^$.|?*+()[]{}#"))
+(def _meta-chars-list (string->list "\\^$.|?*+()[]{}#-"))
 
 (def (pcre2-quote str)
   ;; Escape all PCRE2 metacharacters in str.
@@ -477,7 +497,14 @@
 
 (def (pcre2-release! regex)
   ;; Explicitly release FFI resources (GC handles automatically).
+  ;; Also removes from pattern cache to prevent use-after-free.
   (when (pcre-regex? regex)
+    ;; Remove from cache if present
+    (mutex-lock! _cache-mutex)
+    (unwind-protect
+      (set! _cache (filter (lambda (e) (not (eq? (cdr e) regex))) _cache))
+      (mutex-unlock! _cache-mutex))
+    ;; Release FFI resources
     (let ((md   (pcre-regex-match-data regex))
           (code (pcre-regex-code regex)))
       (when md   (foreign-release! md))
