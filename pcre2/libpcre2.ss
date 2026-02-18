@@ -4,6 +4,7 @@
 ;;; The high-level API lives in pcre2/pcre2.ss.
 
 (import :std/foreign)
+(export #t)
 
 (begin-ffi
   ;; Exported symbols
@@ -211,6 +212,39 @@ static void ffi_pcre2_substitute_free(void) {
 }
 
 /* -------------------------------------------------------------------
+ * Wrappers that pass NULL for context/stack parameters
+ * ------------------------------------------------------------------- */
+static int ffi_pcre2_match(
+    const pcre2_code_8* code,
+    const char* subject, size_t length,
+    size_t startoffset, uint32_t options,
+    pcre2_match_data_8* match_data)
+{
+    return pcre2_match_8(code, (PCRE2_SPTR8)subject, length,
+                         startoffset, options, match_data, NULL);
+}
+
+static pcre2_match_data_8* ffi_pcre2_match_data_create_from_pattern(
+    const pcre2_code_8* code)
+{
+    return pcre2_match_data_create_from_pattern_8(code, NULL);
+}
+
+static pcre2_match_data_8* ffi_pcre2_match_data_create(uint32_t ovecsize) {
+    return pcre2_match_data_create_8(ovecsize, NULL);
+}
+
+static int ffi_pcre2_jit_match(
+    const pcre2_code_8* code,
+    const char* subject, size_t length,
+    size_t startoffset, uint32_t options,
+    pcre2_match_data_8* match_data)
+{
+    return pcre2_jit_match_8(code, (PCRE2_SPTR8)subject, length,
+                              startoffset, options, match_data, NULL);
+}
+
+/* -------------------------------------------------------------------
  * Named groups & pattern info
  * ------------------------------------------------------------------- */
 static int ffi_pcre2_substring_number_from_name(
@@ -376,17 +410,17 @@ C-END
   (define-c-lambda ffi-pcre2-match
     (pcre2-code* char-string size_t size_t unsigned-int32 pcre2-match-data*)
     int
-    "pcre2_match_8")
+    "ffi_pcre2_match")
 
   (define-c-lambda ffi-pcre2-match-data-create-from-pattern
     (pcre2-code*)
     pcre2-match-data*
-    "pcre2_match_data_create_from_pattern_8")
+    "ffi_pcre2_match_data_create_from_pattern")
 
   (define-c-lambda ffi-pcre2-match-data-create
     (unsigned-int32)
     pcre2-match-data*
-    "pcre2_match_data_create_8")
+    "ffi_pcre2_match_data_create")
 
   (define-c-lambda ffi-pcre2-get-ovector-count
     (pcre2-match-data*)
@@ -486,6 +520,6 @@ C-END
   (define-c-lambda ffi-pcre2-jit-match
     (pcre2-code* char-string size_t size_t unsigned-int32 pcre2-match-data*)
     int
-    "pcre2_jit_match_8")
+    "ffi_pcre2_jit_match")
 
 ) ;; end begin-ffi

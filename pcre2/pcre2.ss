@@ -421,13 +421,13 @@
 
 (def (pcre2-pregexp-match pattern subject (start 0) (end #f))
   ;; Like pregexp-match: returns list of strings or #f.
-  (let* ((subj (if end (substring subject start end) (substring subject start)))
+  (let* ((subj (if end (substring subject start end) (substring subject start (string-length subject))))
          (m    (pcre2-search pattern subj 0)))
     (and m (pcre-match->list m))))
 
 (def (pcre2-pregexp-match-positions pattern subject (start 0) (end #f))
   ;; Like pregexp-match-positions: returns list of (start . end) or #f.
-  (let* ((subj (if end (substring subject start end) (substring subject start)))
+  (let* ((subj (if end (substring subject start end) (substring subject start (string-length subject))))
          (m    (pcre2-search pattern subj 0)))
     (and m
          (let* ((sv (pcre-match-span-vec m))
