@@ -138,17 +138,23 @@ static const char* ffi_pcre2_get_error_message(int errorcode) {
  * Ovector access
  * ------------------------------------------------------------------- */
 static size_t ffi_pcre2_ovector_start(pcre2_match_data_8* md, uint32_t idx) {
+    uint32_t count = pcre2_get_ovector_count_8(md);
+    if (idx >= count) return PCRE2_UNSET;
     PCRE2_SIZE* ov = pcre2_get_ovector_pointer_8(md);
     return ov[2*idx];
 }
 
 static size_t ffi_pcre2_ovector_end(pcre2_match_data_8* md, uint32_t idx) {
+    uint32_t count = pcre2_get_ovector_count_8(md);
+    if (idx >= count) return PCRE2_UNSET;
     PCRE2_SIZE* ov = pcre2_get_ovector_pointer_8(md);
     return ov[2*idx + 1];
 }
 
 /* Check if ovector entry is PCRE2_UNSET (SIZE_MAX) — avoids bignum in Scheme */
 static int ffi_pcre2_ovector_is_unset(pcre2_match_data_8* md, uint32_t idx) {
+    uint32_t count = pcre2_get_ovector_count_8(md);
+    if (idx >= count) return 1;
     PCRE2_SIZE* ov = pcre2_get_ovector_pointer_8(md);
     return ov[2*idx] == PCRE2_UNSET;
 }

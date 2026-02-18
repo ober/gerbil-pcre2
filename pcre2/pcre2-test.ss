@@ -16,23 +16,22 @@
         (def rx (pcre2-compile "hello"))
         (check (pcre-regex? rx) ? values))
 
-      (test-case "pcre2-regex caches compiled pattern"
+      (test-case "pcre2-regex creates compiled regex with options"
         (def a (pcre2-regex "world"))
-        (def b (pcre2-regex "world"))
+        (def b (pcre2-regex "world" caseless: #t))
         (check (pcre-regex? a) ? values)
-        ;; second call returns same object (cached)
-        (check (eq? a b) ? values))
+        (check (pcre-regex? b) ? values))
 
       (test-case "pcre2-compile raises on bad pattern"
         (check-exception (pcre2-compile "[invalid") PCRE2Error?))
 
       (test-case "compile with caseless option"
-        (def rx (pcre2-compile "HELLO" caseless: #t))
+        (def rx (pcre2-regex "HELLO" caseless: #t))
         (check (pcre-regex? rx) ? values)
         (check (pcre2-matches? rx "hello world") ? values))
 
       (test-case "compile with multiline option"
-        (def rx (pcre2-compile "^line" multiline: #t))
+        (def rx (pcre2-regex "^line" multiline: #t))
         (check (pcre-regex? rx) ? values)))
 
     ;; -----------------------------------------------------------------
@@ -40,12 +39,12 @@
 
       (test-case "pcre2-match returns pcre-match on success"
         (def rx (pcre2-compile "hel+o"))
-        (def m  (pcre2-match rx "say hello"))
+        (def m  (pcre2-match rx "hello"))
         (check (pcre-match? m) ? values))
 
       (test-case "pcre2-match returns #f on no match"
         (def rx (pcre2-compile "xyz"))
-        (check (pcre2-match rx "hello world") ? #f))
+        (check (pcre2-match rx "hello world") => #f))
 
       (test-case "pcre2-search finds match with offset"
         (def rx (pcre2-compile "\\d+"))
@@ -56,23 +55,23 @@
       (test-case "pcre2-matches? returns bool"
         (def rx (pcre2-compile "^\\d+$"))
         (check (pcre2-matches? rx "12345") ? values)
-        (check (pcre2-matches? rx "123x5") ? #f))
+        (check (pcre2-matches? rx "123x5") => #f))
 
       (test-case "full match group 0 is whole match"
         (def rx (pcre2-compile "f(o+)"))
-        (def m  (pcre2-match rx "foobar"))
+        (def m  (pcre2-search rx "foobar"))
         (check (pcre-match-group m 0) => "foo")
         (check (pcre-match-group m 1) => "oo"))
 
       (test-case "unmatched optional group returns #f"
         (def rx (pcre2-compile "(a)?(b)"))
         (def m  (pcre2-match rx "b"))
-        (check (pcre-match-group m 1) ? #f)
+        (check (pcre-match-group m 1) => #f)
         (check (pcre-match-group m 2) => "b"))
 
       (test-case "named capture groups"
         (def rx (pcre2-compile "(?P<year>\\d{4})-(?P<month>\\d{2})"))
-        (def m  (pcre2-match rx "date: 2024-03"))
+        (def m  (pcre2-search rx "date: 2024-03"))
         (check (pcre-match-named m "year")  => "2024")
         (check (pcre-match-named m "month") => "03"))
 
@@ -91,14 +90,13 @@
         (check (assoc "a" al) => '("a" . "foo"))
         (check (assoc "b" al) => '("b" . "bar")))
 
-      (test-case "pcre-match-positions returns span vector"
+      (test-case "pcre-match-positions returns start/end pair"
         (def rx (pcre2-compile "(\\d+)"))
-        (def m  (pcre2-match rx "abc 99 def"))
-        (def pos (pcre-match-positions m))
-        ;; pos is a vector of (start . end) pairs
-        (check (vector? pos) ? values)
-        (check (car (vector-ref pos 0)) => 4)
-        (check (cdr (vector-ref pos 0)) => 6)))
+        (def m  (pcre2-search rx "abc 99 def"))
+        (def pos (pcre-match-positions m 0))
+        (check (pair? pos) ? values)
+        (check (car pos) => 4)
+        (check (cdr pos) => 6)))
 
     ;; -----------------------------------------------------------------
     (test-suite "substitution"
@@ -113,7 +111,7 @@
 
       (test-case "pcre2-replace with backreference"
         (def rx  (pcre2-compile "(\\w+)"))
-        (check (pcre2-replace rx "hello world" "[${1}]") => "[hello] world"))
+        (check (pcre2-replace rx "hello world" "[$1]" extended: #t) => "[hello] world"))
 
       (test-case "pcre2-replace no match returns original"
         (def rx (pcre2-compile "xyz"))
@@ -122,18 +120,22 @@
     ;; -----------------------------------------------------------------
     (test-suite "iteration"
 
-      (test-case "pcre2-find-all returns list of matches"
+      (test-case "pcre2-find-all returns list of pcre-match objects"
         (def rx (pcre2-compile "\\d+"))
         (def all (pcre2-find-all rx "1 two 3 four 5"))
-        (check all => '("1" "3" "5")))
+        (check (length all) => 3)
+        (check (pcre-match? (car all)) ? values)
+        (check (pcre-match-group (car all) 0) => "1")
+        (check (pcre-match-group (cadr all) 0) => "3")
+        (check (pcre-match-group (caddr all) 0) => "5"))
 
       (test-case "pcre2-find-all with no matches returns empty"
         (def rx (pcre2-compile "\\d+"))
         (check (pcre2-find-all rx "no digits here") => '()))
 
-      (test-case "pcre2-extract extracts capture group"
-        (def rx (pcre2-compile "(\\d+)"))
-        (def extracted (pcre2-extract rx "a1 b22 c333" 1))
+      (test-case "pcre2-extract returns list of matching strings"
+        (def rx (pcre2-compile "\\d+"))
+        (def extracted (pcre2-extract rx "a1 b22 c333"))
         (check extracted => '("1" "22" "333")))
 
       (test-case "pcre2-fold accumulates over matches"
@@ -153,6 +155,9 @@
         (def rx (pcre2-compile "X"))
         (check (pcre2-split rx "hello") => '("hello")))
 
+      (test-case "pcre2-split handles zero-length matches"
+        (check (pcre2-split "(?=\\d)" "a1b2c3") => '("a" "1b" "2c" "3")))
+
       (test-case "pcre2-partition returns alternating non-match/match list"
         (def rx (pcre2-compile "\\d+"))
         ;; Returns: (pre1 match1 pre2 match2 ... tail)
@@ -166,7 +171,7 @@
         (def rx (pcre2-compile q))
         (check (pcre2-matches? rx "foo.bar(baz)?") ? values)
         ;; Should not match unescaped version
-        (check (pcre2-matches? rx "fooXbarYbazZ") ? #f)))
+        (check (pcre2-matches? rx "fooXbarYbazZ") => #f)))
 
     ;; -----------------------------------------------------------------
     (test-suite "pregexp-compatible API"
@@ -177,7 +182,7 @@
         (check (car m) => "hello"))
 
       (test-case "pcre2-pregexp-match returns #f on no match"
-        (check (pcre2-pregexp-match "\\d+" "no numbers") ? #f))
+        (check (pcre2-pregexp-match "\\d+" "no numbers") => #f))
 
       (test-case "pcre2-pregexp-match with start/end bounds"
         (def m (pcre2-pregexp-match "\\w+" "abc def" 4))

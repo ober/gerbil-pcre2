@@ -88,6 +88,13 @@
 ;; Mutex protecting the static substitute buffer in libpcre2
 (def _substitute-mutex (make-mutex 'pcre2-substitute))
 
+;; Mutex protecting compile-time C statics (_ffi_errorcode, _ffi_erroroffset, _ffi_errbuf)
+(def _compile-mutex (make-mutex 'pcre2-compile))
+
+;; Mask options to unsigned 32-bit for FFI (define-const loads PCRE2_ANCHORED
+;; as signed -2147483648 which Gambit rejects for unsigned-int32 parameters)
+(def (u32 n) (bitwise-and n #xFFFFFFFF))
+
 ;;;
 ;;; Name table parsing
 ;;;
@@ -113,22 +120,26 @@
   ;; Compile a PCRE2 pattern. Returns a pcre-regex struct.
   ;; Raises PCRE2Error on invalid pattern.
   ;; JIT is enabled by default — improves match speed significantly.
-  (let* ((plen (string-length pattern))
-         (code (ffi-pcre2-compile pattern plen options)))
-    (when (not code)
-      (raise-pcre2-compile-error
-       'pcre2-compile pattern
-       (ffi-pcre2-compile-errorcode)
-       (ffi-pcre2-compile-erroroffset)))
-    ;; Attempt JIT (gracefully skip if platform doesn't support it)
-    (def jit-ok? #f)
-    (when jit?
-      (let ((jrc (ffi-pcre2-jit-compile code PCRE2_JIT_COMPLETE)))
-        (set! jit-ok? (= jrc 0))))
-    (let* ((md    (ffi-pcre2-match-data-create-from-pattern code))
-           (cnt   (ffi-pcre2-capture-count code))
-           (names (pcre2-build-name-table code)))
-      (make-pcre-regex code md pattern cnt jit-ok? names))))
+  ;; Mutex protects C statics used during compile.
+  (mutex-lock! _compile-mutex)
+  (unwind-protect
+    (let* ((plen (string-length pattern))
+           (code (ffi-pcre2-compile pattern plen (u32 options))))
+      (when (not code)
+        (raise-pcre2-compile-error
+         'pcre2-compile pattern
+         (ffi-pcre2-compile-errorcode)
+         (ffi-pcre2-compile-erroroffset)))
+      ;; Attempt JIT (gracefully skip if platform doesn't support it)
+      (def jit-ok? #f)
+      (when jit?
+        (let ((jrc (ffi-pcre2-jit-compile code PCRE2_JIT_COMPLETE)))
+          (set! jit-ok? (= jrc 0))))
+      (let* ((md    (ffi-pcre2-match-data-create-from-pattern code))
+             (cnt   (ffi-pcre2-capture-count code))
+             (names (pcre2-build-name-table code)))
+        (make-pcre-regex code md pattern cnt jit-ok? names)))
+    (mutex-unlock! _compile-mutex)))
 
 (def (pcre2-regex pattern
                   caseless: (caseless #f)
@@ -153,7 +164,7 @@
     (pcre2-compile pattern opts jit: jit)))
 
 ;;;
-;;; String pattern cache (simple LRU with mutex)
+;;; String pattern cache (LRU with mutex, alist adequate for max=64)
 ;;;
 
 (def _cache-mutex (make-mutex 'pcre2-cache))
@@ -165,7 +176,10 @@
   (unwind-protect
     (let ((entry (assoc pattern _cache)))
       (if entry
-        (cdr entry)
+        (begin
+          ;; Move to front for LRU behavior
+          (set! _cache (cons entry (filter (lambda (e) (not (eq? e entry))) _cache)))
+          (cdr entry))
         (let ((rx (pcre2-compile pattern)))
           (set! _cache (cons (cons pattern rx) _cache))
           (when (> (length _cache) _cache-max)
@@ -183,14 +197,16 @@
 ;;; Internal matching helper
 ;;;
 
-(def (pcre2-do-match rx subject start options)
+(def (pcre2-do-match rx subject start options (md #f))
   ;; Run match and return pcre-match or #f.
+  ;; Allocates per-call match-data for thread safety unless md is provided.
   (let* ((code (pcre-regex-code rx))
-         (md   (pcre-regex-match-data rx))
+         (md   (or md (ffi-pcre2-match-data-create-from-pattern code)))
          (slen (string-length subject))
+         (opts (u32 options))
          (rc   (if (pcre-regex-jit? rx)
-                 (ffi-pcre2-jit-match code subject slen start options md)
-                 (ffi-pcre2-match     code subject slen start options md))))
+                 (ffi-pcre2-jit-match code subject slen start opts md)
+                 (ffi-pcre2-match     code subject slen start opts md))))
     (if (< rc 0)
       #f
       (let* ((ncap (+ (pcre-regex-capture-count rx) 1))
@@ -221,9 +237,10 @@
 
 (def (pcre2-matches? rx/str subject (start 0))
   ;; Test-only: returns boolean. No capture overhead.
+  ;; Allocates per-call match-data for thread safety.
   (let* ((rx   (ensure-regex rx/str))
          (code (pcre-regex-code rx))
-         (md   (pcre-regex-match-data rx))
+         (md   (ffi-pcre2-match-data-create-from-pattern code))
          (slen (string-length subject))
          (rc   (if (pcre-regex-jit? rx)
                  (ffi-pcre2-jit-match code subject slen start 0 md)
@@ -274,7 +291,7 @@
   ;; Replace the first occurrence of rx with replacement.
   ;; Use $1, ${name} etc. in replacement with extended: #t.
   (let* ((rx   (ensure-regex rx/str))
-         (opts (if extended PCRE2_SUBSTITUTE_EXTENDED 0))
+         (opts (u32 (if extended PCRE2_SUBSTITUTE_EXTENDED 0)))
          (rlen (string-length replacement)))
     (mutex-lock! _substitute-mutex)
     (unwind-protect
@@ -295,8 +312,8 @@
                          extended: (extended #f))
   ;; Replace all non-overlapping occurrences of rx with replacement.
   (let* ((rx   (ensure-regex rx/str))
-         (opts (bitwise-ior PCRE2_SUBSTITUTE_GLOBAL
-                            (if extended PCRE2_SUBSTITUTE_EXTENDED 0)))
+         (opts (u32 (bitwise-ior PCRE2_SUBSTITUTE_GLOBAL
+                                 (if extended PCRE2_SUBSTITUTE_EXTENDED 0))))
          (rlen (string-length replacement)))
     (mutex-lock! _substitute-mutex)
     (unwind-protect
@@ -319,10 +336,11 @@
 (def (pcre2-fold rx/str kons knil subject (start 0))
   ;; Fold kons over all non-overlapping matches in subject.
   ;; kons :: (pcre-match accumulator -> accumulator)
-  (let ((rx   (ensure-regex rx/str))
-        (slen (string-length subject)))
+  (let* ((rx   (ensure-regex rx/str))
+         (md   (ffi-pcre2-match-data-create-from-pattern (pcre-regex-code rx)))
+         (slen (string-length subject)))
     (let loop ((pos start) (acc knil))
-      (let ((m (pcre2-do-match rx subject pos 0)))
+      (let ((m (pcre2-do-match rx subject pos 0 md)))
         (if (not m)
           acc
           (let* ((span (vector-ref (pcre-match-span-vec m) 0))
@@ -347,33 +365,44 @@
 (def (pcre2-split rx/str subject (limit #f))
   ;; Split subject by regex delimiter. Returns list of substrings.
   ;; limit: max number of result parts (not splits).
-  (let ((rx   (ensure-regex rx/str))
-        (slen (string-length subject)))
-    (let loop ((pos 0) (acc '()) (count 1))
+  ;; Uses seg-start to track segment boundaries separately from search position,
+  ;; so zero-length matches work correctly as split points.
+  (let* ((rx   (ensure-regex rx/str))
+         (md   (ffi-pcre2-match-data-create-from-pattern (pcre-regex-code rx)))
+         (slen (string-length subject)))
+    (let loop ((pos 0) (seg-start 0) (acc '()) (count 1))
       (if (and limit (>= count limit))
-        (reverse (cons (substring subject pos slen) acc))
-        (let ((m (pcre2-do-match rx subject pos 0)))
+        (reverse (cons (substring subject seg-start slen) acc))
+        (let ((m (pcre2-do-match rx subject pos 0 md)))
           (if (not m)
-            (reverse (cons (substring subject pos slen) acc))
-            (let* ((span  (vector-ref (pcre-match-span-vec m) 0))
+            (reverse (cons (substring subject seg-start slen) acc))
+            (let* ((span   (vector-ref (pcre-match-span-vec m) 0))
                    (mstart (car span))
                    (mend   (cdr span)))
               (if (= mstart mend)
-                ;; Zero-length match — advance one char
-                (if (>= (+ pos 1) slen)
-                  (reverse (cons (substring subject pos slen) acc))
-                  (loop (+ pos 1) acc count))
-                (loop mend
-                      (cons (substring subject pos mstart) acc)
+                ;; Zero-length match
+                (if (= mstart pos)
+                  ;; At current pos — advance one char without splitting
+                  (if (>= (+ pos 1) slen)
+                    (reverse (cons (substring subject seg-start slen) acc))
+                    (loop (+ pos 1) seg-start acc count))
+                  ;; Ahead of current pos — valid split point
+                  (loop mend mend
+                        (cons (substring subject seg-start mstart) acc)
+                        (+ count 1)))
+                ;; Normal match
+                (loop mend mend
+                      (cons (substring subject seg-start mstart) acc)
                       (+ count 1))))))))))
 
 (def (pcre2-partition rx/str subject)
   ;; Partition subject into alternating non-match/match substrings.
   ;; Returns (pre-match1 match1 pre-match2 match2 ... tail)
-  (let ((rx   (ensure-regex rx/str))
-        (slen (string-length subject)))
+  (let* ((rx   (ensure-regex rx/str))
+         (md   (ffi-pcre2-match-data-create-from-pattern (pcre-regex-code rx)))
+         (slen (string-length subject)))
     (let loop ((pos 0) (acc '()))
-      (let ((m (pcre2-do-match rx subject pos 0)))
+      (let ((m (pcre2-do-match rx subject pos 0 md)))
         (if (not m)
           (reverse (cons (substring subject pos slen) acc))
           (let* ((span   (vector-ref (pcre-match-span-vec m) 0))
@@ -390,14 +419,14 @@
 ;;; Pattern quoting
 ;;;
 
-(def _meta-chars "\\^$.|?*+()[]{}#")
+(def _meta-chars-list (string->list "\\^$.|?*+()[]{}#"))
 
 (def (pcre2-quote str)
   ;; Escape all PCRE2 metacharacters in str.
   (let ((p (open-output-string)))
     (string-for-each
      (lambda (c)
-       (when (string-contains _meta-chars (string c))
+       (when (memv c _meta-chars-list)
          (write-char #\\ p))
        (write-char c p))
      str)
