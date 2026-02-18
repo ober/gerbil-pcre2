@@ -113,10 +113,10 @@ static int    _ffi_errorcode   = 0;
 static size_t _ffi_erroroffset = 0;
 
 static pcre2_code_8* ffi_pcre2_compile(
-    const char* pattern, size_t length, uint32_t options)
+    const char* pattern, uint32_t options)
 {
     return pcre2_compile_8(
-        (PCRE2_SPTR8)pattern, length, options,
+        (PCRE2_SPTR8)pattern, PCRE2_ZERO_TERMINATED, options,
         &_ffi_errorcode, &_ffi_erroroffset, NULL);
 }
 
@@ -126,7 +126,7 @@ static size_t ffi_pcre2_compile_erroroffset(void) { return _ffi_erroroffset; }
 /* -------------------------------------------------------------------
  * Error message
  * ------------------------------------------------------------------- */
-static char _ffi_errbuf[512];
+static __thread char _ffi_errbuf[512];
 static const char* ffi_pcre2_get_error_message(int errorcode) {
     int rc = pcre2_get_error_message_8(
         errorcode, (PCRE2_UCHAR8*)_ffi_errbuf, sizeof(_ffi_errbuf));
@@ -163,19 +163,20 @@ static int ffi_pcre2_ovector_is_unset(pcre2_match_data_8* md, uint32_t idx) {
  * Substitute — uses static buffer, returns count or error.
  * NOT thread-safe — the high-level layer must hold a mutex.
  * ------------------------------------------------------------------- */
-static char* _ffi_subst_buf  = NULL;
-static int   _ffi_subst_count = 0;
+static char* _ffi_subst_buf = NULL;
 
 static int ffi_pcre2_do_substitute(
     const pcre2_code_8* code,
-    const char* subject,     size_t subject_length,
+    const char* subject,
     size_t startoffset,      uint32_t options,
     pcre2_match_data_8* match_data,
-    const char* replacement, size_t replacement_length)
+    const char* replacement)
 {
     if (_ffi_subst_buf) { free(_ffi_subst_buf); _ffi_subst_buf = NULL; }
 
     /* First pass: get required output size */
+    size_t subject_length = strlen(subject);
+    size_t replacement_length = strlen(replacement);
     size_t outlen = subject_length + replacement_length + 256;
     _ffi_subst_buf = (char*)malloc(outlen);
     if (!_ffi_subst_buf) return PCRE2_ERROR_NOMEMORY;
@@ -183,10 +184,10 @@ static int ffi_pcre2_do_substitute(
     uint32_t opts = options | PCRE2_SUBSTITUTE_OVERFLOW_LENGTH;
     int rc = pcre2_substitute_8(
         code,
-        (PCRE2_SPTR8)subject, subject_length,
+        (PCRE2_SPTR8)subject, PCRE2_ZERO_TERMINATED,
         startoffset, opts,
         match_data, NULL,
-        (PCRE2_SPTR8)replacement, replacement_length,
+        (PCRE2_SPTR8)replacement, PCRE2_ZERO_TERMINATED,
         (PCRE2_UCHAR8*)_ffi_subst_buf, &outlen);
 
     if (rc == PCRE2_ERROR_NOMEMORY) {
@@ -197,15 +198,14 @@ static int ffi_pcre2_do_substitute(
         size_t outlen2 = outlen + 1;
         rc = pcre2_substitute_8(
             code,
-            (PCRE2_SPTR8)subject, subject_length,
+            (PCRE2_SPTR8)subject, PCRE2_ZERO_TERMINATED,
             startoffset, opts,
             match_data, NULL,
-            (PCRE2_SPTR8)replacement, replacement_length,
+            (PCRE2_SPTR8)replacement, PCRE2_ZERO_TERMINATED,
             (PCRE2_UCHAR8*)_ffi_subst_buf, &outlen2);
     }
 
     if (rc < 0) { free(_ffi_subst_buf); _ffi_subst_buf = NULL; }
-    _ffi_subst_count = rc;
     return rc;
 }
 
@@ -222,11 +222,11 @@ static void ffi_pcre2_substitute_free(void) {
  * ------------------------------------------------------------------- */
 static int ffi_pcre2_match(
     const pcre2_code_8* code,
-    const char* subject, size_t length,
+    const char* subject,
     size_t startoffset, uint32_t options,
     pcre2_match_data_8* match_data)
 {
-    return pcre2_match_8(code, (PCRE2_SPTR8)subject, length,
+    return pcre2_match_8(code, (PCRE2_SPTR8)subject, PCRE2_ZERO_TERMINATED,
                          startoffset, options, match_data, NULL);
 }
 
@@ -242,11 +242,11 @@ static pcre2_match_data_8* ffi_pcre2_match_data_create(uint32_t ovecsize) {
 
 static int ffi_pcre2_jit_match(
     const pcre2_code_8* code,
-    const char* subject, size_t length,
+    const char* subject,
     size_t startoffset, uint32_t options,
     pcre2_match_data_8* match_data)
 {
-    return pcre2_jit_match_8(code, (PCRE2_SPTR8)subject, length,
+    return pcre2_jit_match_8(code, (PCRE2_SPTR8)subject, PCRE2_ZERO_TERMINATED,
                               startoffset, options, match_data, NULL);
 }
 
@@ -282,9 +282,11 @@ static const char* ffi_pcre2_name_entry_name(
 {
     PCRE2_SPTR8 table = NULL;
     uint32_t entry_size = 0;
+    uint32_t name_count = 0;
     pcre2_pattern_info_8(code, PCRE2_INFO_NAMETABLE, &table);
     pcre2_pattern_info_8(code, PCRE2_INFO_NAMEENTRYSIZE, &entry_size);
-    if (!table || entry_size == 0) return "";
+    pcre2_pattern_info_8(code, PCRE2_INFO_NAMECOUNT, &name_count);
+    if (!table || entry_size == 0 || index >= name_count) return "";
     return (const char*)(table + index * entry_size + 2);
 }
 
@@ -293,9 +295,11 @@ static uint32_t ffi_pcre2_name_entry_group(
 {
     PCRE2_SPTR8 table = NULL;
     uint32_t entry_size = 0;
+    uint32_t name_count = 0;
     pcre2_pattern_info_8(code, PCRE2_INFO_NAMETABLE, &table);
     pcre2_pattern_info_8(code, PCRE2_INFO_NAMEENTRYSIZE, &entry_size);
-    if (!table || entry_size == 0) return 0;
+    pcre2_pattern_info_8(code, PCRE2_INFO_NAMECOUNT, &name_count);
+    if (!table || entry_size == 0 || index >= name_count) return 0;
     const uint8_t* entry = table + index * entry_size;
     return ((uint32_t)entry[0] << 8) | (uint32_t)entry[1];
 }
@@ -402,7 +406,7 @@ C-END
 
   ;; Compile: returns pcre2-code* or #f on error (check errorcode/erroroffset)
   (define-c-lambda ffi-pcre2-compile
-    (char-string size_t unsigned-int32)
+    (char-string unsigned-int32)
     pcre2-code*
     "ffi_pcre2_compile")
 
@@ -414,7 +418,7 @@ C-END
 
   ;; Match: returns count (>0) on success, negative error code on failure
   (define-c-lambda ffi-pcre2-match
-    (pcre2-code* char-string size_t size_t unsigned-int32 pcre2-match-data*)
+    (pcre2-code* char-string size_t unsigned-int32 pcre2-match-data*)
     int
     "ffi_pcre2_match")
 
@@ -459,16 +463,15 @@ C-END
     size_t
     "pcre2_get_startchar_8")
 
-  ;; Substitute via static buffer (protect with mutex in caller)
+  ;; Substitute via static buffer (protect with mutex in caller).
+  ;; String lengths computed via PCRE2_ZERO_TERMINATED in C.
   (define-c-lambda ffi-pcre2-do-substitute
     (pcre2-code*        ; code
      char-string        ; subject
-     size_t             ; subject_length
-     size_t             ; startoffset
+     size_t             ; startoffset (byte offset)
      unsigned-int32     ; options
      pcre2-match-data*  ; match_data (may be #f)
-     char-string        ; replacement
-     size_t)            ; replacement_length
+     char-string)       ; replacement
     int
     "ffi_pcre2_do_substitute")
 
@@ -524,7 +527,7 @@ C-END
     "pcre2_jit_compile_8")
 
   (define-c-lambda ffi-pcre2-jit-match
-    (pcre2-code* char-string size_t size_t unsigned-int32 pcre2-match-data*)
+    (pcre2-code* char-string size_t unsigned-int32 pcre2-match-data*)
     int
     "ffi_pcre2_jit_match")
 
