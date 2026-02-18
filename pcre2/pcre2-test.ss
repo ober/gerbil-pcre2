@@ -255,7 +255,26 @@
         (def rx (pcre2-compile "(?=é)"))
         (def all (pcre2-find-all rx "aéb"))
         (check (length all) => 1)
-        (check (pcre-match-positions (car all) 0) => '(1 . 1))))
+        (check (pcre-match-positions (car all) 0) => '(1 . 1)))
+
+      (test-case "non-Latin-1 Unicode: euro sign (U+20AC)"
+        (check (pcre2-matches? "." "\u20ac") ? values)          ;; €
+        (check (pcre-match-group (pcre2-search "\\d+" "100\u20ac") 0) => "100")
+        (check (pcre2-replace "\u20ac" "100\u20ac" "USD") => "100USD"))
+
+      (test-case "non-Latin-1 Unicode: em dash (U+2014)"
+        (check (pcre2-split "\u2014" "one\u2014two\u2014three") => '("one" "two" "three")))
+
+      (test-case "non-Latin-1 Unicode: CJK characters"
+        (def m (pcre2-search "\\p{Han}+" "hello\u65e5\u672c\u8a9eworld"))
+        (check (pcre-match? m) ? values)
+        (check (pcre-match-group m 0) => "\u65e5\u672c\u8a9e"))     ;; 日本語
+
+      (test-case "non-Latin-1 Unicode: mixed BMP characters"
+        (def all (pcre2-extract "\\w+" "caf\u00e9\u20ac\u00e9sum\u00e9"))
+        (check (length all) => 2)
+        (check (car all) => "caf\u00e9")
+        (check (cadr all) => "\u00e9sum\u00e9")))
 
     ;; -----------------------------------------------------------------
     (test-suite "error handling"

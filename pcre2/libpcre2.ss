@@ -406,7 +406,7 @@ C-END
 
   ;; Compile: returns pcre2-code* or #f on error (check errorcode/erroroffset)
   (define-c-lambda ffi-pcre2-compile
-    (char-string unsigned-int32)
+    (UTF-8-string unsigned-int32)
     pcre2-code*
     "ffi_pcre2_compile")
 
@@ -418,7 +418,7 @@ C-END
 
   ;; Match: returns count (>0) on success, negative error code on failure
   (define-c-lambda ffi-pcre2-match
-    (pcre2-code* char-string size_t unsigned-int32 pcre2-match-data*)
+    (pcre2-code* UTF-8-string size_t unsigned-int32 pcre2-match-data*)
     int
     "ffi_pcre2_match")
 
@@ -455,7 +455,7 @@ C-END
 
   (define-c-lambda ffi-pcre2-get-error-message
     (int)
-    char-string
+    UTF-8-string
     "ffi_pcre2_get_error_message")
 
   (define-c-lambda ffi-pcre2-get-startchar
@@ -467,16 +467,16 @@ C-END
   ;; String lengths computed via PCRE2_ZERO_TERMINATED in C.
   (define-c-lambda ffi-pcre2-do-substitute
     (pcre2-code*        ; code
-     char-string        ; subject
+     UTF-8-string       ; subject
      size_t             ; startoffset (byte offset)
      unsigned-int32     ; options
      pcre2-match-data*  ; match_data (may be #f)
-     char-string)       ; replacement
+     UTF-8-string)      ; replacement
     int
     "ffi_pcre2_do_substitute")
 
   ;; Retrieve the result string (copies to Scheme string)
-  (define-c-lambda ffi-pcre2-substitute-result () char-string
+  (define-c-lambda ffi-pcre2-substitute-result () UTF-8-string
     "ffi_pcre2_substitute_result")
 
   ;; Free the static result buffer
@@ -488,7 +488,7 @@ C-END
   ;; -----------------------------------------------------------------------
 
   (define-c-lambda ffi-pcre2-substring-number-from-name
-    (pcre2-code* char-string)
+    (pcre2-code* UTF-8-string)
     int
     "ffi_pcre2_substring_number_from_name")
 
@@ -509,7 +509,7 @@ C-END
 
   (define-c-lambda ffi-pcre2-name-entry-name
     (pcre2-code* unsigned-int32)
-    char-string
+    UTF-8-string
     "ffi_pcre2_name_entry_name")
 
   (define-c-lambda ffi-pcre2-name-entry-group
@@ -527,7 +527,7 @@ C-END
     "pcre2_jit_compile_8")
 
   (define-c-lambda ffi-pcre2-jit-match
-    (pcre2-code* char-string size_t unsigned-int32 pcre2-match-data*)
+    (pcre2-code* UTF-8-string size_t unsigned-int32 pcre2-match-data*)
     int
     "ffi_pcre2_jit_match")
 
